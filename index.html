@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>エスカレーターシミュレーション（物理単位版）</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            color: white;
+            font-family: sans-serif;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #timer {
+            position: absolute;
+            top: 10px;
+            right: 10px; /* 右上に配置 */
+            z-index: 10;
+            color: white;
+            font-family: sans-serif;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #stats {
+            position: absolute;
+            top: auto;
+            bottom: 10px;
+            left: 10px;
+            z-index: 10;
+            color: white;
+            font-family: sans-serif;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+            overflow-y: auto; /* 必要に応じてスクロールバーを追加 */
+        }
+        button {
+            margin: 5px;
+            padding: 5px 10px;
+            cursor: pointer;
+        }
+        #info {
+            margin-bottom: 10px;
+            max-width: 400px;
+        }
+        #stats input[type="number"] {
+            width: 70px; /* 幅を調整 */
+        }
+        #stats > div {
+            margin-bottom: 5px;
+        }
+        /* 結果表示用のスタイル */
+        #results {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            color: white;
+            font-family: sans-serif;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+            display: none; /* 初期状態では非表示 */
+            text-align: center; /* 中央揃え */
+        }
+
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <div id="info">エスカレーターシミュレーション: 左 - 両側立ち止まり (STANDING；青) | 右 - 両側歩行 (WALKING；赤)</div>
+        <div>Speed:
+            <button id="speed1">1x</button>
+            <button id="speed10">10x</button>
+            <button id="speed30">30x</button>
+        </div>
+        <div>
+            Walking Speed (m/s): <input type="number" id="walkingSpeedMS" value="1.2" min="0" step="0.1">
+        </div>
+        <div>STANDING: <span id="standingCount">0</span>人</div>
+        <div>WALKING: <span id="walkingCount">0</span>人</div>
+        <div>単位: 長さ[m], 速度[m/s], 時間[s]</div>
+        <button id="reset">Reset</button>
+        <button id="pauseResume">一時停止</button>
+        <button id="toggleCamera">視点切替</button>
+
+    </div>
+    <div id="timer">00:00:00 / 01:00:00</div>
+
+    <div id="stats">
+        <div>エスカレーター長さ: <input type="number" id="escalatorLengthM" value="20.0" min="1"> m</div>
+        <div>エスカレーター速度: <input type="number" id="escalatorSpeedMS" value="0.5" min="0.1" step="0.1"> m/s</div>
+        <div>人の到着間隔: <input type="number" id="arrivalRateS" value="0.8" min="0.1" step="0.1"> s</div>
+        <div>シミュレーション時間: <input type="number" id="simulationTimeS" value="3600" min="1" step="1"> s</div>
+    </div>
+
+    <!-- 結果表示用のdiv -->
+    <div id="results">
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.150.1/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.150.1/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // 物理単位を明示的に定義したシミュレーションパラメータ
+        let escalatorLength = 20.0;     // エスカレーターの長さ [m]
+        const escalatorWidth = 1.0;       // エスカレーターの幅 [m]
+        const escalatorHeight = 5.0;      // エスカレーターの高さ [m]
+        let escalatorSpeed = 0.5;       // エスカレーター自体の速度 [m/s]
+        let walkingSpeed = 1.2;         // 人の歩く速度 [m/s]
+        let personArrivalRate = 0.8;    // 人が来る間隔 [s]
+        let simulationTimeTotal = 3600; // シミュレーション時間 [s]
+        let simulationSpeed = 1;          // シミュレーション速度倍率 (1, 10, 30)
+
+        // エスカレーター前後の空間
+        const preEscalatorLength = 5; // エスカレーター前の空間の長さ [m]
+        const postEscalatorLength = 5; // エスカレーター後の空間の長さ [m]
+
+
+        let standingCount = 0;
+        let walkingCount = 0;
+        let time = 0;
+        let lastPersonTimeStanding = -Infinity;
+        let lastPersonTimeWalking = -Infinity;
+        let isRunning = true;
+        let lastFrameTime = performance.now();
+
+        // 一時停止機能
+        let isPaused = false;
+
+        // カメラ視点
+        let cameraMode = 'overview'; // 'overview' or 'firstPerson'
+        let targetPerson = null;
+
+
+        // シーンの設定
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x222222);
+
+        // カメラの設定
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+        // レンダラーの設定
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // OrbitControls
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 5, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.minDistance = 5;
+        controls.maxDistance = 50;
+        controls.maxPolarAngle = Math.PI / 2 * 0.95;
+
+        // ライト
+        const ambientLight = new THREE.AmbientLight(0x666666);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(10, 20, 10);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        directionalLight.shadow.camera.near = 0.5;
+        directionalLight.shadow.camera.far = 50;
+        directionalLight.shadow.camera.left = -25;
+        directionalLight.shadow.camera.right = 25;
+        directionalLight.shadow.camera.top = 25;
+        directionalLight.shadow.camera.bottom = -25;
+        scene.add(directionalLight);
+
+        // 床
+        const floorGeometry = new THREE.PlaneGeometry(50, 50 + preEscalatorLength + postEscalatorLength);
+        const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x333333 });
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        floor.position.z = -(preEscalatorLength + postEscalatorLength) / 2 + postEscalatorLength;
+        scene.add(floor);
+
+        // エスカレーターの作成関数
+        function createEscalator(x, isStanding) {
+            const group = new THREE.Group();
+
+            // エスカレーターの基本構造
+            const baseGeometry = new THREE.BoxGeometry(escalatorWidth, 0.5, escalatorLength);
+            const baseMaterial = new THREE.MeshStandardMaterial({ color: 0x808080 });
+            const base = new THREE.Mesh(baseGeometry, baseMaterial);
+            base.position.y = 0.25;
+            base.position.z = 0;
+            base.receiveShadow = true;
+            base.castShadow = true;
+            group.add(base);
+
+            // エスカレーターのステップ
+            for (let i = 0; i < escalatorLength; i += 0.5) {
+                const stepGeometry = new THREE.BoxGeometry(escalatorWidth - 0.1, 0.1, 0.4);
+                const stepMaterial = new THREE.MeshStandardMaterial({ color: 0x999999 });
+                const step = new THREE.Mesh(stepGeometry, stepMaterial);
+
+                // ステップの位置
+                const z = escalatorLength / 2 - i;
+                const y = (i / escalatorLength) * escalatorHeight + 0.5;
+
+                step.position.set(0, y, z);
+                step.receiveShadow = true;
+                step.castShadow = true;
+                group.add(step);
+            }
+
+            // 手すり
+            const handrailGeometry = new THREE.BoxGeometry(0.1, 1, escalatorLength);
+            const handrailMaterial = new THREE.MeshStandardMaterial({ color: 0x333333 });
+
+            const leftHandrail = new THREE.Mesh(handrailGeometry, handrailMaterial);
+            leftHandrail.position.set(-escalatorWidth/2 - 0.05, 1, 0);
+            leftHandrail.castShadow = true;
+            group.add(leftHandrail);
+
+            const rightHandrail = new THREE.Mesh(handrailGeometry, handrailMaterial);
+            rightHandrail.position.set(escalatorWidth/2 + 0.05, 1, 0);
+            rightHandrail.castShadow = true;
+            group.add(rightHandrail);
+
+            // 上部の床
+            const topFloorGeometry = new THREE.BoxGeometry(escalatorWidth, 0.5, 3);
+            const topFloorMaterial = new THREE.MeshStandardMaterial({ color: 0x808080 });
+            const topFloor = new THREE.Mesh(topFloorGeometry, topFloorMaterial);
+            topFloor.position.set(0, escalatorHeight, -escalatorLength/2 - 1.5);
+            topFloor.receiveShadow = true;
+            group.add(topFloor);
+
+            // ラベル
+            const labelGeometry = new THREE.PlaneGeometry(3, 1);
+            const labelMaterial = new THREE.MeshBasicMaterial({
+                color: isStanding ? 0x0000ff : 0xff0000,
+                transparent: true,
+                opacity: 0.7
+            });
+            const label = new THREE.Mesh(labelGeometry, labelMaterial);
+            label.position.set(0, escalatorHeight + 2, -escalatorLength/2 - 1.5);
+            label.rotation.x = -Math.PI / 4;
+            group.add(label);
+
+            // エスカレーター前後の平面
+            const preEscalatorGeometry = new THREE.PlaneGeometry(escalatorWidth, preEscalatorLength);
+            const preEscalatorMaterial = new THREE.MeshBasicMaterial({ color: isStanding ? 0x0000ff : 0xff0000, transparent: true, opacity: 0.2 });
+            const preEscalator = new THREE.Mesh(preEscalatorGeometry, preEscalatorMaterial);
+            preEscalator.rotation.x = -Math.PI / 2;
+            preEscalator.position.set(0, 0.01, escalatorLength / 2 + preEscalatorLength / 2);
+            group.add(preEscalator);
+
+            const postEscalatorGeometry = new THREE.PlaneGeometry(escalatorWidth, postEscalatorLength);
+            const postEscalatorMaterial = new THREE.MeshBasicMaterial({ color: isStanding ? 0x0000ff : 0xff0000, transparent: true, opacity: 0.2 });
+            const postEscalator = new THREE.Mesh(postEscalatorGeometry, postEscalatorMaterial);
+            postEscalator.rotation.x = -Math.PI / 2;
+            postEscalator.position.set(0, escalatorHeight + 0.01, -escalatorLength / 2 - postEscalatorLength / 2);
+            group.add(postEscalator);
+
+            group.position.set(x, 0, 0);
+            scene.add(group);
+            return group;
+        }
+
+        // 人のオブジェクトを作成する関数
+        function createPerson(isWalking) {
+            const group = new THREE.Group();
+
+            // 体
+            const bodyGeometry = new THREE.CapsuleGeometry(0.15, 0.9, 4, 8);
+            const bodyMaterial = new THREE.MeshStandardMaterial({
+                color: isWalking ? 0xff0000 : 0x0000ff
+            });
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.position.y = 0.8;
+            body.castShadow = true;
+            group.add(body);
+
+            // 頭
+            const headGeometry = new THREE.SphereGeometry(0.1, 16, 16);
+            const headMaterial = new THREE.MeshStandardMaterial({
+                color: isWalking ? 0xff5555 : 0x5555ff
+            });
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.y = 1.45;
+            head.castShadow = true;
+            group.add(head);
+
+            // 腕
+            const armGeometry = new THREE.CapsuleGeometry(0.05, 0.5, 4, 8);
+            const armMaterial = new THREE.MeshStandardMaterial({
+                color: isWalking ? 0xff3333 : 0x3333ff
+            });
+
+            const leftArm = new THREE.Mesh(armGeometry, armMaterial);
+            leftArm.position.set(-0.2, 1.1, 0);
+            leftArm.rotation.z = Math.PI / 6;
+            leftArm.castShadow = true;
+            group.add(leftArm);
+
+            const rightArm = new THREE.Mesh(armGeometry, armMaterial);
+            rightArm.position.set(0.2, 1.1, 0);
+            rightArm.rotation.z = -Math.PI / 6;
+            rightArm.castShadow = true;
+            group.add(rightArm);
+
+            // 足
+            const legGeometry = new THREE.CapsuleGeometry(0.06, 0.7, 4, 8);
+            const legMaterial = new THREE.MeshStandardMaterial({
+                color: isWalking ? 0xdd0000 : 0x0000dd
+            });
+
+            const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
+            leftLeg.position.set(-0.1, 0.35, 0);
+            leftLeg.castShadow = true;
+            group.add(leftLeg);
+
+            const rightLeg = new THREE.Mesh(legGeometry, legMaterial);
+            rightLeg.position.set(0.1, 0.35, 0);
+            rightLeg.castShadow = true;
+            group.add(rightLeg);
+
+            // 人のデータ
+            group.userData = {
+                isWalking: isWalking,
+                progress: 0,
+                lane: Math.random() < 0.5 ? -1 : 1,
+                initialY: 0,
+                waiting: true,
+            };
+
+            return group;
+        }
+
+        // エスカレーターの作成 (初期状態)
+        let escalatorStanding = createEscalator(-5, true);
+        let escalatorWalking = createEscalator(5, false);
+
+        // 人の配列
+        const standingPeople = [];
+        const walkingPeople = [];
+
+        // 人をエスカレーターに追加 (STANDING)
+        function addStandingPerson() {
+            const person = createPerson(false);
+            const laneOffset = person.userData.lane * (escalatorWidth / 4);
+            person.position.set(-5 + laneOffset, 0, escalatorLength / 2 + preEscalatorLength);
+            person.userData.initialY = person.position.y;
+            scene.add(person);
+            standingPeople.push(person);
+        }
+
+        // 人をエスカレーターに追加 (WALKING)
+        function addWalkingPerson() {
+            const person = createPerson(true);
+            const laneOffset = person.userData.lane * (escalatorWidth / 4);
+            person.position.set(5 + laneOffset, 0, escalatorLength / 2 + preEscalatorLength);
+            person.userData.initialY = person.position.y;
+            scene.add(person);
+            walkingPeople.push(person);
+        }
+
+        // タイマー更新関数
+        function updateTimer() {
+            const totalSeconds = Math.min(time, simulationTimeTotal);
+            const hours = Math.floor(totalSeconds / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = Math.floor(totalSeconds % 60);
+            const formattedTime = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            const totalTime = `${String(Math.floor(simulationTimeTotal / 3600)).padStart(2, '0')}:${String(Math.floor((simulationTimeTotal % 3600) / 60)).padStart(2, '0')}:${String(Math.floor(simulationTimeTotal % 60)).padStart(2, '0')}`;
+
+            document.getElementById('timer').innerText = `${formattedTime} / ${totalTime} (${simulationSpeed}倍速)`;
+        }
+
+        // エスカレーター上の人の移動 + 待機 + 混雑度に応じた速度変化
+        function movePeople(peopleArray, isWalking, deltaTime, xPos) {
+
+            peopleArray.sort((a,b) => b.position.z - a.position.z);
+
+            for (let i = 0; i < peopleArray.length; i++) {
+                const person = peopleArray[i];
+
+                if (person.userData.waiting) {
+                // 待機状態
+                if (person.position.z > escalatorLength / 2 + 0.5) {
+                    person.position.z -= 1.0 * deltaTime; // ゆっくり前進（1.0 m/s）
+                } else {
+                    person.userData.waiting = false; // エスカレーターに乗る
+                }
+                } else {
+
+                    // 前の人との距離を計算
+                    let distanceToNext = Infinity;
+                    for(let j = 0; j < peopleArray.length; j++){
+                        if(i !== j && peopleArray[j].userData.lane === person.userData.lane && peopleArray[j].position.z > person.position.z){
+                            const dist = peopleArray[j].position.z - person.position.z;
+                            if(dist < distanceToNext){
+                                distanceToNext = dist;
+                            }
+                        }
+                    }
+
+                    // エスカレーターに乗っている状態
+                    let speed = escalatorSpeed;
+                    if (isWalking) {
+                        const minDistance = 0.5; // 最小間隔
+                        const speedFactor = Math.max(0, Math.min(1, distanceToNext / minDistance)); // 速度係数
+                        speed += walkingSpeed * speedFactor; //混雑度に応じた歩行速度
+                    }
+
+                    person.userData.progress += speed * deltaTime;
+                    const progress = person.userData.progress;
+                    const z = escalatorLength / 2 - progress;
+                    let y = person.userData.initialY;
+
+                    if (progress > 0 && progress < escalatorLength) {
+                        y = (progress / escalatorLength) * escalatorHeight;
+                    } else if (progress >= escalatorLength) {
+                        y = escalatorHeight;
+                    }
+
+                    person.position.z = z;
+                    person.position.y = y;
+
+                    // エスカレーターの終点 + postEscalatorLength を超えたら削除
+                    if (progress > escalatorLength + postEscalatorLength) {
+                        scene.remove(person);
+                        peopleArray.splice(i, 1);
+
+                        if (isWalking) {
+                        walkingCount++;
+                        } else {
+                        standingCount++;
+                        }
+                        updateCountsDisplay();
+                    }
+                }
+            }
+        }
+
+    // カウント表示を更新する関数
+    function updateCountsDisplay() {
+        document.getElementById('standingCount').textContent = standingCount;
+        document.getElementById('walkingCount').textContent = walkingCount;
+    }
+
+    // パラメータが変更されたときにエスカレーターを再生成する関数
+    function recreateEscalators() {
+          // 既存のエスカレーターを削除
+          scene.remove(escalatorStanding);
+          scene.remove(escalatorWalking);
+
+          // エスカレーターを再生成
+          escalatorStanding = createEscalator(-5, true);
+          escalatorWalking = createEscalator(5, false);
+    }
+
+    // パラメータ変更時に呼ばれる関数
+    function onParameterChange() {
+        // 入力値を取得
+        escalatorLength = parseFloat(document.getElementById('escalatorLengthM').value);
+        escalatorSpeed = parseFloat(document.getElementById('escalatorSpeedMS').value);
+        walkingSpeed = parseFloat(document.getElementById('walkingSpeedMS').value); // walkingSpeedも更新
+        personArrivalRate = parseFloat(document.getElementById('arrivalRateS').value);
+        simulationTimeTotal = parseFloat(document.getElementById('simulationTimeS').value);
+
+        // エスカレーターを再生成
+        recreateEscalators();
+
+        // 床の位置を更新
+        floor.position.z = -(preEscalatorLength + postEscalatorLength) / 2 + postEscalatorLength;
+
+        // カメラ位置を調整 (エスカレーター全体が見えるように)
+        camera.position.set(0, 15, escalatorLength * 1.5 + preEscalatorLength);
+        controls.target.set(0, 5, 0);
+
+    }
+
+    // パラメータ入力欄にイベントリスナーを追加
+    document.getElementById('escalatorLengthM').addEventListener('input', onParameterChange);
+    document.getElementById('escalatorSpeedMS').addEventListener('input', onParameterChange);
+    document.getElementById('walkingSpeedMS').addEventListener('input', onParameterChange); // walkingSpeed
+    document.getElementById('arrivalRateS').addEventListener('input', onParameterChange);
+    document.getElementById('simulationTimeS').addEventListener('input', onParameterChange);
+
+    // アニメーションループ
+    function animate(currentTime) {
+        if (!isRunning) return;
+
+        requestAnimationFrame(animate);
+
+        if (isPaused) {
+            lastFrameTime = currentTime;
+            return; // 一時停止中は更新しない
+        }
+
+        // 実時間に基づいたdeltaTimeの計算（秒単位）
+        const deltaTime = (currentTime - lastFrameTime) / 1000;
+        lastFrameTime = currentTime;
+
+        // シミュレーション時間の更新（物理単位[s]に基づく）
+        const simulationDeltaTime = deltaTime * simulationSpeed;
+
+
+        // シミュレーション時間が設定された時間を超えないようにする
+        if (time < simulationTimeTotal) {
+            time += simulationDeltaTime;
+
+            // 人の生成
+            if (time - lastPersonTimeStanding >= personArrivalRate) {
+                addStandingPerson();
+                lastPersonTimeStanding = time;
+            }
+
+            if (time - lastPersonTimeWalking >= personArrivalRate) {
+                addWalkingPerson();
+                lastPersonTimeWalking = time;
+            }
+
+            // 人の移動
+            movePeople(standingPeople, false, simulationDeltaTime, -5);
+            movePeople(walkingPeople, true, simulationDeltaTime, 5);
+
+            updateTimer(); // タイマーを更新
+
+            // カメラモードの切り替え
+            if (cameraMode === 'firstPerson' && targetPerson) {
+                // 選択した人の視点に合わせてカメラを更新
+                camera.position.set(
+                    targetPerson.position.x,
+                    targetPerson.position.y + 0.3, // 目の高さ
+                    targetPerson.position.z
+                );
+                camera.lookAt(
+                    targetPerson.position.x,
+                    targetPerson.position.y + 0.3,
+                    targetPerson.position.z - 1 // 前方を見る
+                );
+            }
+
+
+        } else {
+          // シミュレーション時間が経過したら停止
+          if (isRunning) { // isRunningがtrueの場合のみ停止処理
+            isRunning = false;
+            console.log("シミュレーション終了");
+
+            // 結果を表示
+              displayResults();
+            }
+        }
+
+        controls.update(); // OrbitControls の更新
+        renderer.render(scene, camera);
+    }
+
+    // 結果表示関数
+    function displayResults() {
+        const standingRate = standingCount / (simulationTimeTotal / personArrivalRate);
+        const walkingRate = walkingCount / (simulationTimeTotal / personArrivalRate);
+        const efficiency = standingRate > 0 ? walkingRate / standingRate : "計算不可";
+
+        const resultsDiv = document.getElementById('results'); // resultsDivを取得
+
+        resultsDiv.innerHTML = `
+            <h3>シミュレーション結果</h3>
+            <p>STANDING: ${standingCount}人 (通過率: ${(standingRate * 100).toFixed(1)}%)</p>
+            <p>WALKING: ${walkingCount}人 (通過率: ${(walkingRate * 100).toFixed(1)}%)</p>
+            <p>効率比: ${typeof efficiency === 'number' ? efficiency.toFixed(2) + '倍' : efficiency}</p>
+            <button id="closeResults">閉じる</button>
+        `;
+        resultsDiv.style.display = 'block';
+
+        document.getElementById('closeResults').addEventListener('click', () => {
+            resultsDiv.style.display = 'none';
+        });
+    }
+
+    // カメラの初期位置 (エスカレーター全体が見えるように)
+    camera.position.set(0, 15, escalatorLength * 1.5 + preEscalatorLength);
+    controls.target.set(0,5,0);
+
+    // アニメーション開始
+    animate(performance.now());
+
+    // スピードコントロール
+    document.getElementById('speed1').addEventListener('click', () => {
+        simulationSpeed = 1;
+        updateTimer();
+    });
+
+    document.getElementById('speed10').addEventListener('click', () => {
+        simulationSpeed = 10;
+        updateTimer();
+    });
+
+    document.getElementById('speed30').addEventListener('click', () => {
+        simulationSpeed = 30;
+        updateTimer();
+    });
+
+    // リセット機能
+    document.getElementById('reset').addEventListener('click', () => {
+        // 状態のリセット
+        time = 0;
+        standingCount = 0;
+        walkingCount = 0;
+        lastPersonTimeStanding = -Infinity;
+        lastPersonTimeWalking = -Infinity;
+        isRunning = true;
+        isPaused = false; // 一時停止状態もリセット
+        document.getElementById('pauseResume').textContent = '一時停止'; // ボタンのテキストを戻す
+        lastFrameTime = performance.now();
+
+        // 人のオブジェクトを全て削除
+        standingPeople.forEach(person => scene.remove(person));
+        walkingPeople.forEach(person => scene.remove(person));
+        standingPeople.length = 0;
+        walkingPeople.length = 0;
+
+        // パラメータを初期値に戻す
+        document.getElementById('escalatorLengthM').value = "20.0";
+        document.getElementById('escalatorSpeedMS').value = "0.5";
+        document.getElementById('walkingSpeedMS').value = "1.2";
+        document.getElementById('arrivalRateS').value = "0.8";
+        document.getElementById('simulationTimeS').value = "3600";
+        onParameterChange(); // パラメータを更新
+
+        // カメラをリセット
+        cameraMode = 'overview';
+        controls.enabled = true;
+
+        // カウントをリセット
+        updateCountsDisplay();
+        updateTimer();  // タイマーリセット
+        animate(performance.now()); // アニメーションを再開
+    });
+
+    // 一時停止/再開機能
+    document.getElementById('pauseResume').addEventListener('click', () => {
+        isPaused = !isPaused;
+        document.getElementById('pauseResume').textContent = isPaused ? '再開' : '一時停止';
+
+        if (!isPaused && !isRunning) {
+            isRunning = true;
+            lastFrameTime = performance.now();
+            animate(lastFrameTime);
+        }
+    });
+
+    // カメラ視点切り替え機能
+    document.getElementById('toggleCamera').addEventListener('click', () => {
+        cameraMode = cameraMode === 'overview' ? 'firstPerson' : 'overview';
+
+        if (cameraMode === 'overview') {
+            controls.enabled = true;
+            camera.position.set(0, 15, escalatorLength * 1.5 + preEscalatorLength);
+            controls.target.set(0, 5, 0);
+        } else {
+            // 一人称視点用に人を選択（例：最初の歩行者）
+            targetPerson = walkingPeople.length > 0 ? walkingPeople[0] :
+                          (standingPeople.length > 0 ? standingPeople[0] : null);
+            controls.enabled = false; // OrbitControlsを無効化
+        }
+    });
+
+    // リサイズ対応
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+</script>
+</body>
+</html>
